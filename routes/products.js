@@ -4,41 +4,52 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const sharp = require("sharp");
-const { body, param, validationResult } = require("express-validator");
+const { body, param, query, validationResult } = require("express-validator");
+const sanitizeHtml = require("sanitize-html");
 const db = require("../database");
 
-// Image uploads
 const uploadDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-// Config multer for handling multipart/form-data (img uploads)
+const NAME_REGEX = /^[\p{L}\p{N}\s\-_.,()]{1,80}$/u;
+const MAX_DESC_LEN = 1000;
+
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
-    const allowed = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
+    const allowedMime = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/gif",
+      "image/bmp",
+    ];
     const ext = path.extname(file.originalname).toLowerCase();
-    allowed.includes(ext)
-      ? cb(null, true)
-      : cb(new Error("Invalid image format"));
+    const allowedExt = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
+    if (!allowedMime.includes(file.mimetype))
+      return cb(new Error("Invalid image MIME type"));
+    if (!allowedExt.includes(ext))
+      return cb(new Error("Invalid image extension"));
+    cb(null, true);
   },
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
-// Automatic image processing, generate full-size + thumbnail, return paths
 async function processAndSaveImages(buffer, pid) {
-  const fullName = `${pid}.jpg`;
-  const thumbName = `${pid}_thumb.jpg`;
+  const id = Number(pid);
+  const fullName = `${id}.jpg`;
+  const thumbName = `${id}_thumb.jpg`;
   const fullPath = path.join(uploadDir, fullName);
   const thumbPath = path.join(uploadDir, thumbName);
 
-  // Resize
   await sharp(buffer)
+    .rotate()
     .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 85 })
     .toFile(fullPath);
 
-  // Thumbnail
   await sharp(buffer)
+    .rotate()
     .resize(400, 400, { fit: "cover" })
     .jpeg({ quality: 75 })
     .toFile(thumbPath);
@@ -56,48 +67,72 @@ const validate = (req, res, next) => {
   next();
 };
 
-// GET /api/products  (?catid=x)
-router.get("/", (req, res) => {
-  const rows = req.query.catid
-    ? db
-        .prepare("SELECT * FROM products WHERE catid = ? ORDER BY pid")
-        .all(req.query.catid)
-    : db.prepare("SELECT * FROM products ORDER BY pid").all();
-  res.json(rows);
-});
+const sanitizeText = (v) =>
+  sanitizeHtml(String(v || ""), {
+    allowedTags: [],
+    allowedAttributes: {},
+  }).trim();
 
-// GET /api/products/:id
-router.get("/:id", param("id").isInt(), validate, (req, res) => {
+router.get(
+  "/",
+  query("catid").optional().isInt({ min: 1 }),
+  validate,
+  (req, res) => {
+    const rows = req.query.catid
+      ? db
+          .prepare("SELECT * FROM products WHERE catid = ? ORDER BY pid")
+          .all(Number(req.query.catid))
+      : db.prepare("SELECT * FROM products ORDER BY pid").all();
+    res.json(rows);
+  },
+);
+
+router.get("/:id", param("id").isInt({ min: 1 }), validate, (req, res) => {
   const row = db
     .prepare("SELECT * FROM products WHERE pid = ?")
-    .get(req.params.id);
+    .get(Number(req.params.id));
   if (!row) return res.status(404).json({ error: "Product not found" });
   res.json(row);
 });
 
-// POST /api/products
 router.post(
   "/",
   upload.single("image"),
-  body("catid").isInt().withMessage("catid must be integer"),
-  body("name").trim().notEmpty().escape(),
-  body("price").isFloat({ gt: 0 }),
-  body("description").optional().trim().escape(),
+  body("catid").isInt({ min: 1 }).withMessage("catid must be positive integer"),
+  body("name")
+    .customSanitizer(sanitizeText)
+    .matches(NAME_REGEX)
+    .withMessage("Invalid product name"),
+  body("price").isFloat({ gt: 0, lt: 1000000 }).withMessage("Invalid price"),
+  body("description")
+    .optional()
+    .customSanitizer(sanitizeText)
+    .isLength({ max: MAX_DESC_LEN })
+    .withMessage("Description too long"),
   validate,
   async (req, res) => {
     try {
-      const { catid, name, price, description } = req.body;
+      const catid = Number(req.body.catid);
+      const name = req.body.name;
+      const price = Number(req.body.price);
+      const description = req.body.description || "";
+
+      // verify category exists (anti tampering)
+      const cat = db
+        .prepare("SELECT catid FROM categories WHERE catid = ?")
+        .get(catid);
+      if (!cat) return res.status(400).json({ error: "Invalid category id" });
+
       const result = db
         .prepare(
           "INSERT INTO products (catid, name, price, description) VALUES (?, ?, ?, ?)",
         )
-        .run(catid, name, parseFloat(price), description || "");
-      const pid = result.lastInsertRowid;
+        .run(catid, name, price, description);
 
+      const pid = Number(result.lastInsertRowid);
       let imagePaths = { image_path: null, image_thumb_path: null };
 
       if (req.file) {
-        // resize, thumbail+original size
         imagePaths = await processAndSaveImages(req.file.buffer, pid);
         db.prepare(
           "UPDATE products SET image_path = ?, image_thumb_path = ? WHERE pid = ?",
@@ -106,103 +141,104 @@ router.post(
 
       res.status(201).json({
         pid,
-        catid: Number(catid),
+        catid,
         name,
-        price: parseFloat(price),
+        price,
         description,
         ...imagePaths,
       });
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Failed to create product" });
     }
   },
 );
 
-// PUT /api/products/:id
 router.put(
   "/:id",
   upload.single("image"),
-  param("id").isInt(),
-  body("catid").optional().isInt(),
-  body("name").optional().trim().notEmpty().escape(),
-  body("price").optional().isFloat({ gt: 0 }),
-  body("description").optional().trim().escape(),
+  param("id").isInt({ min: 1 }),
+  body("catid").optional().isInt({ min: 1 }),
+  body("name")
+    .optional()
+    .customSanitizer(sanitizeText)
+    .matches(NAME_REGEX)
+    .withMessage("Invalid product name"),
+  body("price").optional().isFloat({ gt: 0, lt: 1000000 }),
+  body("description")
+    .optional()
+    .customSanitizer(sanitizeText)
+    .isLength({ max: MAX_DESC_LEN }),
   validate,
   async (req, res) => {
     try {
+      const pid = Number(req.params.id);
       const existing = db
         .prepare("SELECT * FROM products WHERE pid = ?")
-        .get(req.params.id);
+        .get(pid);
       if (!existing)
         return res.status(404).json({ error: "Product not found" });
 
-      const catid = req.body.catid ?? existing.catid;
+      const catid = req.body.catid ? Number(req.body.catid) : existing.catid;
       const name = req.body.name ?? existing.name;
-      const price = req.body.price
-        ? parseFloat(req.body.price)
-        : existing.price;
+      const price = req.body.price ? Number(req.body.price) : existing.price;
       const description = req.body.description ?? existing.description;
+
+      const cat = db
+        .prepare("SELECT catid FROM categories WHERE catid = ?")
+        .get(catid);
+      if (!cat) return res.status(400).json({ error: "Invalid category id" });
 
       let image_path = existing.image_path;
       let image_thumb_path = existing.image_thumb_path;
 
       if (req.file) {
-        const paths = await processAndSaveImages(
-          req.file.buffer,
-          req.params.id,
-        );
+        const paths = await processAndSaveImages(req.file.buffer, pid);
         image_path = paths.image_path;
         image_thumb_path = paths.image_thumb_path;
       }
 
       db.prepare(
-        "UPDATE products SET catid=?, name=?, price=?, description=?, image_path=?, image_thumb_path=? WHERE pid=?",
-      ).run(
+        "UPDATE products SET catid = ?, name = ?, price = ?, description = ?, image_path = ?, image_thumb_path = ? WHERE pid = ?",
+      ).run(catid, name, price, description, image_path, image_thumb_path, pid);
+
+      res.json({
+        pid,
         catid,
         name,
         price,
         description,
         image_path,
         image_thumb_path,
-        req.params.id,
-      );
-
-      res.json({
-        pid: Number(req.params.id),
-        catid: Number(catid),
-        name,
-        price,
-        description,
-        image_path,
-        image_thumb_path,
       });
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Failed to update product" });
     }
   },
 );
 
-// DELETE /api/products/:id
-router.delete("/:id", param("id").isInt(), validate, (req, res) => {
-  // Delete associated images if exist
+router.delete("/:id", param("id").isInt({ min: 1 }), validate, (req, res) => {
+  const pid = Number(req.params.id);
+
   const row = db
     .prepare("SELECT image_path, image_thumb_path FROM products WHERE pid = ?")
-    .get(req.params.id);
+    .get(pid);
+
   if (row) {
     [row.image_path, row.image_thumb_path].forEach((p) => {
-      if (p) {
-        const abs = path.join(__dirname, "..", p);
-        if (fs.existsSync(abs)) fs.unlinkSync(abs);
-      }
+      if (!p) return;
+      // prevent path traversal
+      if (!/^\/uploads\/[a-zA-Z0-9._-]+\.jpg$/.test(p)) return;
+      const abs = path.join(__dirname, "..", p);
+      if (fs.existsSync(abs)) fs.unlinkSync(abs);
     });
   }
-  const result = db
-    .prepare("DELETE FROM products WHERE pid = ?")
-    .run(req.params.id);
+
+  const result = db.prepare("DELETE FROM products WHERE pid = ?").run(pid);
   if (result.changes === 0)
     return res.status(404).json({ error: "Product not found" });
+
   res.json({ message: "Deleted" });
 });
 
