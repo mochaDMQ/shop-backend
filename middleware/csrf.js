@@ -1,7 +1,5 @@
-// csrf.js
 const crypto = require("crypto");
 function issueCsrfNonce(req, res) {
-  // 每次请求都生成新 nonce，覆盖旧值
   const nonce = crypto.randomBytes(32).toString("hex");
   req.session.csrfNonce = nonce;
   res.json({ nonce });

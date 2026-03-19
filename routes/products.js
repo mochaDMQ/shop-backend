@@ -7,6 +7,7 @@ const sharp = require("sharp");
 const { body, param, query, validationResult } = require("express-validator");
 const sanitizeHtml = require("sanitize-html");
 const db = require("../database");
+const { requireAdmin } = require("../middleware/auth");
 
 const uploadDir = path.join(__dirname, "../uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -97,6 +98,7 @@ router.get("/:id", param("id").isInt({ min: 1 }), validate, (req, res) => {
 
 router.post(
   "/",
+  requireAdmin,
   upload.single("image"),
   body("catid").isInt({ min: 1 }).withMessage("catid must be positive integer"),
   body("name")
@@ -156,6 +158,7 @@ router.post(
 
 router.put(
   "/:id",
+  requireAdmin,
   upload.single("image"),
   param("id").isInt({ min: 1 }),
   body("catid").optional().isInt({ min: 1 }),
@@ -218,7 +221,7 @@ router.put(
   },
 );
 
-router.delete("/:id", param("id").isInt({ min: 1 }), validate, (req, res) => {
+router.delete("/:id", requireAdmin, param("id").isInt({ min: 1 }), validate, (req, res) => {
   const pid = Number(req.params.id);
 
   const row = db

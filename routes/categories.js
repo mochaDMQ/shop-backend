@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { body, param, validationResult } = require("express-validator");
 const db = require("../database");
+const { requireAdmin } = require("../middleware/auth");
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -10,7 +11,6 @@ const validate = (req, res, next) => {
   next();
 };
 
-// GET /api/categories (?type=cakes|breads)
 router.get("/", (req, res) => {
   const { type } = req.query;
   const rows = type
@@ -21,7 +21,6 @@ router.get("/", (req, res) => {
   res.json(rows);
 });
 
-// GET /api/categories/:id
 router.get("/:id", param("id").isInt(), validate, (req, res) => {
   const row = db
     .prepare("SELECT * FROM categories WHERE catid = ?")
@@ -30,9 +29,9 @@ router.get("/:id", param("id").isInt(), validate, (req, res) => {
   res.json(row);
 });
 
-// POST /api/categories
 router.post(
   "/",
+  requireAdmin,
   body("name").trim().notEmpty().withMessage("Name is required").escape(),
   validate,
   (req, res) => {
@@ -49,9 +48,10 @@ router.post(
   },
 );
 
-// PUT /api/categories/:id
+// PUT /api/categories/:id (Admin only)
 router.put(
   "/:id",
+  requireAdmin,
   param("id").isInt(),
   body("name").trim().notEmpty().escape(),
   validate,
@@ -65,14 +65,20 @@ router.put(
   },
 );
 
-// DELETE /api/categories/:id
-router.delete("/:id", param("id").isInt(), validate, (req, res) => {
-  const result = db
-    .prepare("DELETE FROM categories WHERE catid = ?")
-    .run(req.params.id);
-  if (result.changes === 0)
-    return res.status(404).json({ error: "Category not found" });
-  res.json({ message: "Deleted" });
-});
+// DELETE /api/categories/:id (Admin only)
+router.delete(
+  "/:id",
+  requireAdmin,
+  param("id").isInt(),
+  validate,
+  (req, res) => {
+    const result = db
+      .prepare("DELETE FROM categories WHERE catid = ?")
+      .run(req.params.id);
+    if (result.changes === 0)
+      return res.status(404).json({ error: "Category not found" });
+    res.json({ message: "Deleted" });
+  },
+);
 
 module.exports = router;
