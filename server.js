@@ -18,19 +18,23 @@ function detectEnvironment() {
   if (process.env.NODE_ENV) {
     return process.env.NODE_ENV;
   }
-  
+
   // 2. Auto-detect based on environment characteristics
   const cwd = process.cwd();
   const hostname = require("os").hostname();
-  
+
   // Check if running in a typical production environment
-  const isProductionPath = cwd.includes("/var/www") || cwd.includes("/home") && cwd.includes("www");
-  const isProductionHost = hostname.includes("iems") || hostname.includes("prod") || hostname.includes("server");
-  
+  const isProductionPath =
+    cwd.includes("/var/www") || (cwd.includes("/home") && cwd.includes("www"));
+  const isProductionHost =
+    hostname.includes("iems") ||
+    hostname.includes("prod") ||
+    hostname.includes("server");
+
   if (isProductionPath || isProductionHost) {
     return "production";
   }
-  
+
   // 3. Default to development
   return "development";
 }
@@ -42,7 +46,10 @@ if (!process.env.NODE_ENV) {
 }
 
 // Load the appropriate .env file
-const envFile = process.env.NODE_ENV === "production" ? ".env.production" : ".env.development";
+const envFile =
+  process.env.NODE_ENV === "production"
+    ? ".env.production"
+    : ".env.development";
 const envPath = path.join(__dirname, envFile);
 
 console.log(`[Server] Environment: ${process.env.NODE_ENV}`);
@@ -50,12 +57,15 @@ console.log(`[Server] Loading config: ${envPath}`);
 
 require("dotenv").config({ path: envPath });
 
+const { ordersRouter, stripeWebhookRouter } = require("./routes/orders");
+
 // ─────────────────────────────────────────────────────────────
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === "production";
-const PROD_ORIGIN = process.env.FRONTEND_ORIGIN || "https://s75.iems5718.iecuhk.cc";
+const PROD_ORIGIN =
+  process.env.FRONTEND_ORIGIN || "https://s75.iems5718.iecuhk.cc";
 const DEV_ORIGIN = "http://localhost:8080";
 const allowedOrigins = isProd ? [PROD_ORIGIN] : [DEV_ORIGIN];
 
@@ -107,20 +117,24 @@ app.use(
     origin(origin, cb) {
       // Allow requests with no origin (like mobile apps, curl, or same-origin requests)
       if (!origin) return cb(null, true);
-      
+
       // Debug log
       console.log(`[CORS] Request from origin: ${origin}`);
       console.log(`[CORS] Allowed origins:`, allowedOrigins);
-      
+
       if (allowedOrigins.includes(origin)) {
         return cb(null, true);
       }
-      
+
       // In production, also allow the same domain
-      if (isProd && (origin === "https://s75.iems5718.iecuhk.cc" || origin === "http://s75.iems5718.iecuhk.cc")) {
+      if (
+        isProd &&
+        (origin === "https://s75.iems5718.iecuhk.cc" ||
+          origin === "http://s75.iems5718.iecuhk.cc")
+      ) {
         return cb(null, true);
       }
-      
+
       console.error(`[CORS] Blocked origin: ${origin}`);
       return cb(new Error("Not allowed by CORS"));
     },
@@ -131,6 +145,12 @@ app.use(
 );
 
 // Body & Cookie parser
+
+app.use(
+  "/api/webhooks",
+  express.raw({ type: "application/json", limit: "100kb" }),
+  stripeWebhookRouter(),
+);
 
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "100kb" }));
@@ -186,6 +206,7 @@ app.use(
 app.use("/api/auth", verifyCsrf, require("./routes/auth"));
 app.use("/api/categories", verifyCsrf, require("./routes/categories"));
 app.use("/api/products", verifyCsrf, require("./routes/products"));
+app.use("/api/orders", verifyCsrf, ordersRouter);
 
 // Admin verification endpoint, used for frontend route guards
 app.get("/api/admin/verify", requireAdmin, (req, res) => {
