@@ -11,3 +11,6 @@ build
 *.db-journal
 *.sqlite
 *.sqlite3
+.env.production
+.env.development
+    

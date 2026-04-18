@@ -7,14 +7,62 @@ const session = require("express-session");
 const crypto = require("crypto");
 const { issueCsrfNonce, verifyCsrf } = require("./middleware/csrf");
 const { requireAdmin, optionalAuth } = require("./middleware/auth");
-require("dotenv").config({ path: ".env.development" });
+
+// ─────────────────────────────────────────────────────────────
+// Environment Detection
+// Priority: NODE_ENV env var > auto-detect > default to development
+// ─────────────────────────────────────────────────────────────
+
+function detectEnvironment() {
+  // 1. If NODE_ENV is explicitly set, use it
+  if (process.env.NODE_ENV) {
+    return process.env.NODE_ENV;
+  }
+  
+  // 2. Auto-detect based on environment characteristics
+  const cwd = process.cwd();
+  const hostname = require("os").hostname();
+  
+  // Check if running in a typical production environment
+  const isProductionPath = cwd.includes("/var/www") || cwd.includes("/home") && cwd.includes("www");
+  const isProductionHost = hostname.includes("iems") || hostname.includes("prod") || hostname.includes("server");
+  
+  if (isProductionPath || isProductionHost) {
+    return "production";
+  }
+  
+  // 3. Default to development
+  return "development";
+}
+
+// Set NODE_ENV if not already set
+const detectedEnv = detectEnvironment();
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = detectedEnv;
+}
+
+// Load the appropriate .env file
+const envFile = process.env.NODE_ENV === "production" ? ".env.production" : ".env.development";
+const envPath = path.join(__dirname, envFile);
+
+console.log(`[Server] Environment: ${process.env.NODE_ENV}`);
+console.log(`[Server] Loading config: ${envPath}`);
+
+require("dotenv").config({ path: envPath });
+
+// ─────────────────────────────────────────────────────────────
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === "production";
-const PROD_ORIGIN = "http://s75.iems5718.iecuhk.cc";
+const PROD_ORIGIN = process.env.FRONTEND_ORIGIN || "https://s75.iems5718.iecuhk.cc";
 const DEV_ORIGIN = "http://localhost:8080";
 const allowedOrigins = isProd ? [PROD_ORIGIN] : [DEV_ORIGIN];
+
+// Debug: Log CORS configuration on startup
+console.log(`[Server] NODE_ENV: ${process.env.NODE_ENV}`);
+console.log(`[Server] FRONTEND_ORIGIN: ${process.env.FRONTEND_ORIGIN}`);
+console.log(`[Server] Allowed Origins:`, allowedOrigins);
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -32,12 +80,12 @@ app.use(
           "data:",
           "blob:",
           "http://localhost:3000",
-          "http://s75.iems5718.iecuhk.cc",
+          "https://s75.iems5718.iecuhk.cc",
         ],
         connectSrc: [
           "'self'",
           "http://localhost:3000",
-          "http://s75.iems5718.iecuhk.cc",
+          "https://s75.iems5718.iecuhk.cc",
         ],
         fontSrc: ["'self'"],
         objectSrc: ["'none'"],
@@ -57,13 +105,28 @@ app.use(
 app.use(
   cors({
     origin(origin, cb) {
+      // Allow requests with no origin (like mobile apps, curl, or same-origin requests)
       if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+      
+      // Debug log
+      console.log(`[CORS] Request from origin: ${origin}`);
+      console.log(`[CORS] Allowed origins:`, allowedOrigins);
+      
+      if (allowedOrigins.includes(origin)) {
+        return cb(null, true);
+      }
+      
+      // In production, also allow the same domain
+      if (isProd && (origin === "https://s75.iems5718.iecuhk.cc" || origin === "http://s75.iems5718.iecuhk.cc")) {
+        return cb(null, true);
+      }
+      
+      console.error(`[CORS] Blocked origin: ${origin}`);
       return cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-CSRF-Token"],
+    allowedHeaders: ["Content-Type", "X-CSRF-Token", "Authorization"],
   }),
 );
 
@@ -87,7 +150,7 @@ app.use(
     genid: () => crypto.randomUUID(),
     cookie: {
       httpOnly: true,
-      // secure: isProd,
+      secure: isProd, // Enable secure cookies in production (HTTPS required)
       sameSite: "lax",
       maxAge: 3 * 24 * 60 * 60 * 1000, // 3 days
     },
