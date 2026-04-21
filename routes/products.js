@@ -36,10 +36,20 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
+function safeDeleteUploadFile(fileUrlPath) {
+  if (!fileUrlPath) return;
+  // prevent path traversal, only allow files under /uploads with .jpg suffix
+  if (!/^\/uploads\/[a-zA-Z0-9._-]+\.jpg$/.test(fileUrlPath)) return;
+  const abs = path.join(__dirname, "..", fileUrlPath);
+  if (fs.existsSync(abs)) fs.unlinkSync(abs);
+}
+
 async function processAndSaveImages(buffer, pid) {
   const id = Number(pid);
-  const fullName = `${id}.jpg`;
-  const thumbName = `${id}_thumb.jpg`;
+  // Use versioned file names to avoid browser cache showing old images
+  const version = Date.now();
+  const fullName = `${id}_${version}.jpg`;
+  const thumbName = `${id}_${version}_thumb.jpg`;
   const fullPath = path.join(uploadDir, fullName);
   const thumbPath = path.join(uploadDir, thumbName);
 
@@ -197,6 +207,9 @@ router.put(
 
       if (req.file) {
         const paths = await processAndSaveImages(req.file.buffer, pid);
+        // Remove old image files after new files are successfully generated
+        safeDeleteUploadFile(existing.image_path);
+        safeDeleteUploadFile(existing.image_thumb_path);
         image_path = paths.image_path;
         image_thumb_path = paths.image_thumb_path;
       }
@@ -221,28 +234,32 @@ router.put(
   },
 );
 
-router.delete("/:id", requireAdmin, param("id").isInt({ min: 1 }), validate, (req, res) => {
-  const pid = Number(req.params.id);
+router.delete(
+  "/:id",
+  requireAdmin,
+  param("id").isInt({ min: 1 }),
+  validate,
+  (req, res) => {
+    const pid = Number(req.params.id);
 
-  const row = db
-    .prepare("SELECT image_path, image_thumb_path FROM products WHERE pid = ?")
-    .get(pid);
+    const row = db
+      .prepare(
+        "SELECT image_path, image_thumb_path FROM products WHERE pid = ?",
+      )
+      .get(pid);
 
-  if (row) {
-    [row.image_path, row.image_thumb_path].forEach((p) => {
-      if (!p) return;
-      // prevent path traversal
-      if (!/^\/uploads\/[a-zA-Z0-9._-]+\.jpg$/.test(p)) return;
-      const abs = path.join(__dirname, "..", p);
-      if (fs.existsSync(abs)) fs.unlinkSync(abs);
-    });
-  }
+    if (row) {
+      [row.image_path, row.image_thumb_path].forEach((p) => {
+        safeDeleteUploadFile(p);
+      });
+    }
 
-  const result = db.prepare("DELETE FROM products WHERE pid = ?").run(pid);
-  if (result.changes === 0)
-    return res.status(404).json({ error: "Product not found" });
+    const result = db.prepare("DELETE FROM products WHERE pid = ?").run(pid);
+    if (result.changes === 0)
+      return res.status(404).json({ error: "Product not found" });
 
-  res.json({ message: "Deleted" });
-});
+    res.json({ message: "Deleted" });
+  },
+);
 
 module.exports = router;
